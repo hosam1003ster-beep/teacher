@@ -1,0 +1,587 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { QUESTIONS } from "@/data/questions";
+import {
+  ACHIEVEMENT_LABELS,
+  LEVEL_LABEL,
+  LEVEL_TIME,
+  buildGameQuestions,
+  getLevelByIndex,
+  loadLeaderboard,
+  saveLeaderboard,
+  shuffle,
+} from "@/lib/game";
+import { AchievementKey, GameState, LeaderboardEntry } from "@/types/game";
+
+type RenderedQuestion = {
+  id: string;
+  sentence: string;
+  prompt: string;
+  explanation: string;
+  tip: string;
+  level: "easy" | "medium" | "hard";
+  options: { text: string; isCorrect: boolean }[];
+};
+
+const initialState: GameState = {
+  playerName: "",
+  status: "start",
+  questions: [],
+  currentIndex: 0,
+  score: 0,
+  streak: 0,
+  bestStreak: 0,
+  lives: 3,
+  answered: false,
+  selectedIndex: null,
+  timeLeft: 20,
+  level: "easy",
+  usedHintInCurrentQuestion: false,
+  usedSkip: false,
+  hiddenOptionIndexes: [],
+  achievements: [],
+};
+
+function addAchievement(list: AchievementKey[], key: AchievementKey) {
+  return list.includes(key) ? list : [...list, key];
+}
+
+function createRenderedQuestions(): RenderedQuestion[] {
+  return buildGameQuestions(QUESTIONS).map((q) => ({
+    id: q.id,
+    sentence: q.sentence,
+    prompt: q.prompt,
+    explanation: q.explanation,
+    tip: q.tip,
+    level: q.level,
+    options: shuffle(
+      q.options.map((text, index) => ({
+        text,
+        isCorrect: index === q.correctIndex,
+      }))
+    ),
+  }));
+}
+
+export default function GrammarGame() {
+  const [game, setGame] = useState<GameState>(initialState);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [toast, setToast] = useState("");
+
+  useEffect(() => {
+    setLeaderboard(loadLeaderboard());
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(""), 2200);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    if (game.status !== "playing" || game.answered) return;
+    if (game.timeLeft <= 0) {
+      handleTimeout();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setGame((prev) => ({ ...prev, timeLeft: prev.timeLeft - 1 }));
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [game.status, game.timeLeft, game.answered]);
+
+  const currentQuestion = useMemo(() => {
+    return game.questions[game.currentIndex] as RenderedQuestion | undefined;
+  }, [game.questions, game.currentIndex]);
+
+  const progress = useMemo(() => {
+    if (!game.questions.length) return 0;
+    return (game.currentIndex / game.questions.length) * 100;
+  }, [game.currentIndex, game.questions.length]);
+
+  function startGame() {
+    const playerName = game.playerName.trim() || "لاعب";
+    const questions = createRenderedQuestions();
+    const level = getLevelByIndex(0);
+
+    setGame({
+      ...initialState,
+      playerName,
+      status: "playing",
+      questions,
+      level,
+      timeLeft: LEVEL_TIME[level],
+    });
+  }
+
+  function goHome() {
+    setGame((prev) => ({
+      ...initialState,
+      playerName: prev.playerName,
+    }));
+  }
+
+  function moveToNextQuestion(nextState?: Partial<GameState>) {
+    setGame((prev) => {
+      const nextIndex = prev.currentIndex + 1;
+      if (nextIndex >= prev.questions.length || prev.lives <= 0) {
+        const finalAchievements =
+          prev.lives > 0
+            ? addAchievement(prev.achievements, "survivor")
+            : prev.achievements;
+
+        const finishedState: GameState = {
+          ...prev,
+          ...nextState,
+          achievements: finalAchievements,
+          status: "finished",
+        };
+
+        saveLeaderboard({
+          name: finishedState.playerName,
+          score: finishedState.score,
+          bestStreak: finishedState.bestStreak,
+          date: new Date().toISOString(),
+        });
+        setLeaderboard(loadLeaderboard());
+        return finishedState;
+      }
+
+      const nextLevel = getLevelByIndex(nextIndex);
+      const updatedAchievements =
+        nextLevel === "hard"
+          ? addAchievement(
+              nextState?.achievements || prev.achievements,
+              "master"
+            )
+          : nextState?.achievements || prev.achievements;
+
+      if (nextLevel === "hard" && !prev.achievements.includes("master")) {
+        setToast("🏅 إنجاز جديد: 👑 وصلت إلى مستوى التحدّي");
+      }
+
+      return {
+        ...prev,
+        ...nextState,
+        currentIndex: nextIndex,
+        answered: false,
+        selectedIndex: null,
+        hiddenOptionIndexes: [],
+        usedHintInCurrentQuestion: false,
+        level: nextLevel,
+        timeLeft: LEVEL_TIME[nextLevel],
+        achievements: updatedAchievements,
+      };
+    });
+  }
+
+  function handleAnswer(index: number) {
+    if (!currentQuestion || game.answered) return;
+
+    const selected = currentQuestion.options[index];
+    const correctIndex = currentQuestion.options.findIndex((o) => o.isCorrect);
+
+    if (selected.isCorrect) {
+      let achievements = addAchievement(game.achievements, "firstWin");
+      const nextStreak = game.streak + 1;
+
+      if (nextStreak >= 3) achievements = addAchievement(achievements, "streak3");
+      if (nextStreak >= 5) achievements = addAchievement(achievements, "streak5");
+
+      const isFirstWin = !game.achievements.includes("firstWin");
+      const getsStreak3 = nextStreak >= 3 && !game.achievements.includes("streak3");
+      const getsStreak5 = nextStreak >= 5 && !game.achievements.includes("streak5");
+
+      if (isFirstWin) setToast("🏅 إنجاز جديد: ✅ أول إجابة صحيحة");
+      if (getsStreak3) setToast("🏅 إنجاز جديد: 🔥 ثلاث إجابات متتالية");
+      if (getsStreak5) setToast("🏅 إنجاز جديد: ⚡ خمس إجابات متتالية");
+
+      setGame((prev) => ({
+        ...prev,
+        answered: true,
+        selectedIndex: index,
+        score: prev.score + 10 + prev.timeLeft,
+        streak: nextStreak,
+        bestStreak: Math.max(prev.bestStreak, nextStreak),
+        achievements,
+      }));
+    } else {
+      setGame((prev) => ({
+        ...prev,
+        answered: true,
+        selectedIndex: index,
+        lives: prev.lives - 1,
+        streak: 0,
+      }));
+    }
+
+    setTimeout(() => {
+      moveToNextQuestion();
+    }, 1600);
+  }
+
+  function handleTimeout() {
+    if (game.answered) return;
+    setGame((prev) => ({
+      ...prev,
+      answered: true,
+      selectedIndex: null,
+      lives: prev.lives - 1,
+      streak: 0,
+    }));
+
+    setTimeout(() => {
+      moveToNextQuestion();
+    }, 1600);
+  }
+
+  function useHint() {
+    if (!currentQuestion || game.usedHintInCurrentQuestion || game.answered) return;
+
+    const wrongIndexes = currentQuestion.options
+      .map((option, index) => ({ option, index }))
+      .filter((item) => !item.option.isCorrect)
+      .map((item) => item.index);
+
+    const hidden = shuffle(wrongIndexes).slice(0, 2);
+
+    setGame((prev) => ({
+      ...prev,
+      usedHintInCurrentQuestion: true,
+      hiddenOptionIndexes: hidden,
+    }));
+    setToast("💡 تم حذف إجابتين خاطئتين");
+  }
+
+  function skipQuestion() {
+    if (game.usedSkip || game.answered) return;
+    setGame((prev) => ({
+      ...prev,
+      usedSkip: true,
+    }));
+    setToast("⏭ تم تخطّي السؤال");
+    moveToNextQuestion();
+  }
+
+  const stars =
+    game.score >= 170 ? 3 : game.score >= 110 ? 2 : game.score >= 40 ? 1 : 0;
+
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,#172554_0%,#0b1020_42%,#020617_100%)] text-slate-100 p-4 md:p-6">
+      {game.status === "start" && (
+        <div className="mx-auto max-w-6xl grid gap-6 lg:grid-cols-[1.15fr_.85fr]">
+          <div className="rounded-[28px] border border-white/10 bg-slate-900/70 backdrop-blur p-7 md:p-10 shadow-2xl">
+            <div className="mb-4 text-6xl">📚</div>
+            <p className="mb-2 text-sm font-bold text-emerald-300">
+              لغة عربية • الصف الحادي عشر
+            </p>
+            <h1 className="mb-4 text-4xl md:text-5xl font-extrabold leading-tight bg-gradient-to-r from-emerald-300 via-cyan-300 to-amber-300 bg-clip-text text-transparent">
+              لعبة المفاعيل الاحترافية
+            </h1>
+            <p className="mb-6 text-2xl leading-10 text-slate-300">
+              تجربة تعليمية تفاعلية بمستويات، قلوب، إنجازات، وسلسلة أداء
+              تساعد الطالب على التعلّم والمتعة معًا.
+            </p>
+
+            <div className="mb-6 grid gap-3 sm:grid-cols-3 text-sm">
+              <div className="rounded-2xl border border-white/10 bg-slate-800/60 p-4">
+                <div className="mb-1 font-bold text-emerald-300">🎯 3 مستويات</div>
+                <div className="text-slate-400">تدرّج تعليمي واضح</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-slate-800/60 p-4">
+                <div className="mb-1 font-bold text-cyan-300">🔥 سلسلة إنجاز</div>
+                <div className="text-slate-400">تحفيز مستمر</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-slate-800/60 p-4">
+                <div className="mb-1 font-bold text-amber-300">🏆 لوحة أبطال</div>
+                <div className="text-slate-400">أفضل النتائج</div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                value={game.playerName}
+                onChange={(e) =>
+                  setGame((prev) => ({ ...prev, playerName: e.target.value }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") startGame();
+                }}
+                placeholder="اكتب اسمك للبدء"
+                className="flex-1 rounded-2xl border border-slate-700 bg-slate-950/70 px-5 py-4 text-center sm:text-right outline-none focus:border-emerald-400"
+              />
+              <button
+                onClick={startGame}
+                className="rounded-2xl bg-emerald-500 px-8 py-4 font-extrabold text-slate-950 transition hover:bg-emerald-400"
+              >
+                ابدأ المغامرة
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-[28px] border border-white/10 bg-slate-900/70 backdrop-blur p-7 shadow-2xl">
+            <h2 className="mb-5 text-xl font-extrabold text-amber-300">أفضل النتائج</h2>
+            <div className="space-y-2">
+              {leaderboard.length ? (
+                leaderboard.map((entry, index) => (
+                  <div
+                    key={`${entry.name}-${entry.date}`}
+                    className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm"
+                  >
+                    <div>
+                      <span className="font-bold text-amber-300">{index + 1}. </span>
+                      {entry.name}
+                    </div>
+                    <div className="font-bold text-emerald-300">{entry.score}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/40 px-4 py-5 text-sm text-slate-400">
+                  لا توجد نتائج بعد. كن أول بطل.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {game.status === "playing" && currentQuestion && (
+        <div className="mx-auto max-w-6xl grid gap-5 xl:grid-cols-[1fr_320px]">
+          <div className="rounded-[28px] border border-white/10 bg-slate-900/70 backdrop-blur p-5 md:p-7 shadow-2xl">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-2">
+                <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm font-bold text-emerald-300">
+                  المستوى: {LEVEL_LABEL[game.level]}
+                </span>
+                <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm font-bold text-cyan-300">
+                  {game.currentIndex + 1} / {game.questions.length}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <div className="rounded-full border border-slate-700 bg-slate-950/60 px-4 py-2 text-sm font-bold">
+                  ⏱ {game.timeLeft}ث
+                </div>
+                <div className="rounded-full border border-slate-700 bg-slate-950/60 px-4 py-2 text-sm font-bold">
+                  🏆 {game.score}
+                </div>
+                <div className="rounded-full border border-slate-700 bg-slate-950/60 px-4 py-2 text-sm font-bold">
+                  🔥 {game.streak}
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-6 h-3 w-full overflow-hidden rounded-full bg-slate-800">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-cyan-400 to-amber-400 transition-all"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+
+            <div className="mb-5 rounded-[24px] border border-slate-800 bg-slate-950/60 p-6 md:p-8">
+              <div className="mb-3 text-sm font-bold text-emerald-300">الجملة</div>
+              <p className="mb-5 text-center text-3xl md:text-4xl leading-[2.6rem] md:leading-[3.3rem] text-slate-100">
+                {currentQuestion.sentence}
+              </p>
+              <p className="text-center text-base md:text-lg font-bold text-cyan-300">
+                {currentQuestion.prompt}
+              </p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              {currentQuestion.options.map((option, index) => {
+                const isHidden = game.hiddenOptionIndexes.includes(index);
+                const isSelected = game.selectedIndex === index;
+                const isCorrect = option.isCorrect && game.answered;
+                const isWrong = isSelected && game.answered && !option.isCorrect;
+
+                return (
+                  <button
+                    key={`${currentQuestion.id}-${index}`}
+                    disabled={game.answered || isHidden}
+                    onClick={() => handleAnswer(index)}
+                    className={[
+                      "rounded-2xl border px-5 py-4 text-right font-bold transition",
+                      isHidden
+                        ? "cursor-not-allowed opacity-30 border-slate-800 bg-slate-950/30"
+                        : "border-slate-800 bg-slate-950/70 hover:-translate-y-0.5 hover:border-emerald-400/50",
+                      isCorrect ? "border-emerald-400 bg-emerald-500 text-slate-950" : "",
+                      isWrong ? "border-rose-400 bg-rose-500 text-white" : "",
+                    ].join(" ")}
+                  >
+                    {option.text}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
+              <div
+                className={`mb-2 font-extrabold ${
+                  game.answered
+                    ? currentQuestion.options[game.selectedIndex ?? -1]?.isCorrect
+                      ? "text-emerald-300"
+                      : "text-rose-300"
+                    : "text-amber-300"
+                }`}
+              >
+                {game.answered
+                  ? currentQuestion.options[game.selectedIndex ?? -1]?.isCorrect
+                    ? "✅ إجابة صحيحة"
+                    : "❌ راجع الفكرة"
+                  : "💡 نصيحة"}
+              </div>
+              <div className="text-lg leading-9 text-slate-300">
+                {game.answered ? currentQuestion.explanation : currentQuestion.tip}
+              </div>
+            </div>
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                onClick={useHint}
+                disabled={game.usedHintInCurrentQuestion || game.answered}
+                className="rounded-2xl bg-amber-400 px-5 py-3 font-extrabold text-slate-950 transition disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                💡 تلميح
+              </button>
+              <button
+                onClick={skipQuestion}
+                disabled={game.usedSkip || game.answered}
+                className="rounded-2xl bg-slate-700 px-5 py-3 font-extrabold text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                ⏭ تخطّي مرة واحدة
+              </button>
+            </div>
+          </div>
+
+          <aside className="h-fit rounded-[28px] border border-white/10 bg-slate-900/70 backdrop-blur p-5 md:p-6 shadow-2xl">
+            <h3 className="mb-4 text-xl font-extrabold text-amber-300">لوحة الإنجاز</h3>
+
+            <div className="mb-5 grid grid-cols-3 gap-2 text-center text-2xl">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div
+                  key={i}
+                  className={`rounded-2xl border border-slate-800 bg-slate-950/60 py-3 ${
+                    i < game.lives ? "" : "opacity-30"
+                  }`}
+                >
+                  {i < game.lives ? "❤️" : "🖤"}
+                </div>
+              ))}
+            </div>
+
+            <div className="mb-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-2 text-sm text-slate-400">المستوى الحالي</div>
+              <div className="font-bold text-slate-100">
+                {LEVEL_LABEL[game.level]}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-2 text-sm text-slate-400">الإنجازات</div>
+              <div className="space-y-2 text-sm">
+                {Object.entries(ACHIEVEMENT_LABELS).map(([key, label]) => {
+                  const active = game.achievements.includes(key as AchievementKey);
+                  return (
+                    <div
+                      key={key}
+                      className={`rounded-xl px-3 py-2 border ${
+                        active
+                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                          : "border-slate-800 bg-slate-950/50 text-slate-500"
+                      }`}
+                    >
+                      {label}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {game.status === "finished" && (
+        <div className="mx-auto max-w-2xl rounded-[28px] border border-white/10 bg-slate-900/70 backdrop-blur p-8 md:p-10 text-center shadow-2xl">
+          <div className="mb-4 text-4xl">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <span
+                key={i}
+                className={i < stars ? "text-amber-400" : "text-slate-700"}
+              >
+                ★
+              </span>
+            ))}
+          </div>
+
+          <h2 className="mb-2 text-4xl font-extrabold bg-gradient-to-r from-emerald-300 via-cyan-300 to-amber-300 bg-clip-text text-transparent">
+            أحسنت يا {game.playerName}
+          </h2>
+          <p className="mb-6 text-slate-300">أنهيت الجولة التعليمية</p>
+
+          <div className="mb-6 grid gap-3 sm:grid-cols-3 text-sm">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-1 text-slate-400">النقاط</div>
+              <div className="text-3xl font-extrabold text-emerald-300">{game.score}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-1 text-slate-400">أفضل سلسلة</div>
+              <div className="text-3xl font-extrabold text-cyan-300">{game.bestStreak}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-1 text-slate-400">المرحلة</div>
+              <div className="text-3xl font-extrabold text-amber-300">
+                {LEVEL_LABEL[game.level]}
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-6 text-2xl leading-10 text-slate-200">
+            {game.score >= 170
+              ? "أداء رائع جدًا! لديك فهم قوي ودقّة ممتازة."
+              : game.score >= 110
+              ? "نتيجة جميلة، أنت على الطريق الصحيح."
+              : game.lives <= 0
+              ? "خسرت القلوب، لكنك اكتسبت معرفة مهمة."
+              : "بداية جيدة، ومع التدريب ستصبح خبيرًا."}
+          </div>
+
+          <div className="mb-7 flex flex-wrap justify-center gap-2">
+            {game.achievements.map((key) => (
+              <span
+                key={key}
+                className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-bold text-emerald-300"
+              >
+                {ACHIEVEMENT_LABELS[key]}
+              </span>
+            ))}
+          </div>
+
+          <div className="flex flex-col justify-center gap-3 sm:flex-row">
+            <button
+              onClick={startGame}
+              className="rounded-2xl bg-emerald-500 px-8 py-4 font-extrabold text-slate-950 transition hover:bg-emerald-400"
+            >
+              إعادة اللعب
+            </button>
+            <button
+              onClick={goHome}
+              className="rounded-2xl bg-slate-700 px-8 py-4 font-extrabold text-white transition hover:bg-slate-600"
+            >
+              العودة للرئيسية
+            </button>
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-slate-700 bg-slate-950 px-5 py-3 text-slate-100 shadow-2xl">
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
